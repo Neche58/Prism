@@ -38,6 +38,7 @@ export default function DecodeForm({ onDecode }: DecodeFormProps) {
                   "Check the diagnostic logs to see if there are internal contract assertion failures",
                 difficulty: "medium",
                 requires_upgrade: false,
+                id: "host.contract.internal_error.fix.diagnostic_logs",
               },
             ],
           };
@@ -63,6 +64,7 @@ export default function DecodeForm({ onDecode }: DecodeFormProps) {
                   "Check the asset flags and ensure the operation is allowed for the target asset",
                 difficulty: "easy",
                 requires_upgrade: false,
+                id: "host.contract.operation_not_supported.fix.check_asset_flags",
               },
             ],
           };
@@ -89,6 +91,7 @@ export default function DecodeForm({ onDecode }: DecodeFormProps) {
                   "Ensure that initialization is only called once per contract deployment",
                 difficulty: "easy",
                 requires_upgrade: false,
+                id: "host.contract.already_initialized.fix.single_init",
               },
             ],
           };
@@ -115,6 +118,7 @@ export default function DecodeForm({ onDecode }: DecodeFormProps) {
                   "Verify that the addresses provided exist and are active on the target network",
                 difficulty: "easy",
                 requires_upgrade: false,
+                id: "host.contract.account_missing.fix.verify_address",
               },
             ],
           };
@@ -140,6 +144,7 @@ export default function DecodeForm({ onDecode }: DecodeFormProps) {
                   "Review the contract source code for the error enum definition to understand the specific failure",
                 difficulty: "medium",
                 requires_upgrade: false,
+                id: "host.contract.custom.fix.review_error_enum",
               },
             ],
           };
@@ -167,6 +172,24 @@ export default function DecodeForm({ onDecode }: DecodeFormProps) {
               description: "Optimize contract code and reduce loop count",
               difficulty: "medium",
               requires_upgrade: false,
+              id: "host.budget.cpu_limit_exceeded.fix.optimize_loops",
+              remedy_code: [
+                "// Before: every iteration re-reads storage, so cost grows with the loop",
+                "for key in keys.iter() {",
+                "    totals.push_back(env.storage().persistent().get(key).unwrap_or(0));",
+                "}",
+                "",
+                "// After: one storage read per key, and the sum is computed in memory",
+                "let values: Vec<u64> = keys",
+                "    .iter()",
+                "    .map(|key| env.storage().persistent().get(key).unwrap_or(0))",
+                "    .collect();",
+              ].join("\n"),
+              example: [
+                "// In a soroban-sdk unit test, assert the instruction cost stays under budget",
+                "let budget = env.cost_estimate().budget();",
+                "assert!(budget.cpu_instruction_cost() < 100_000_000);",
+              ].join("\n"),
             },
           ],
         };

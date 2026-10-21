@@ -22,6 +22,8 @@ export interface SuggestedFix {
   difficulty: string;
   requires_upgrade: boolean;
   example?: string;
+  id: string;
+  remedy_code?: string;
 }
 
 export interface ContractErrorInfo {

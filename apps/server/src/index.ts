@@ -5,8 +5,15 @@ import { sessionRoutes } from "./routes/session";
 import { aiRoutes } from "./routes/ai";
 import { config } from "./config";
 import { SessionStore } from "./session-store";
+import { replayQueue } from "./workers/queue";
 
 const server = Fastify({ logger: true });
+
+// A queue connection error must not take the API down: jobs fail to enqueue
+// and surface as request errors, but existing sessions keep working.
+replayQueue.on("error", (err) => {
+  server.log.error({ err }, "Replay queue connection error");
+});
 
 // ---------------------------------------------------------------------------
 // Bootstrap the session store and attach it as a decorator so every route
@@ -24,8 +31,9 @@ server.addHook("onReady", async () => {
 });
 
 server.addHook("onClose", async () => {
+  await replayQueue.close();
   await sessionStore.disconnect();
-  server.log.info("Session store disconnected from Redis");
+  server.log.info("Replay queue and session store disconnected from Redis");
 });
 
 // ---------------------------------------------------------------------------

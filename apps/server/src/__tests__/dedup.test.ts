@@ -2,6 +2,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fingerprint } from "../dedup";
 
 // ---------------------------------------------------------------------------
+// Pin the dedup window so `waitForResult` deadlines stay inside the test
+// timeout instead of using the 10s production default.
+// ---------------------------------------------------------------------------
+vi.mock("../config", () => ({
+  config: {
+    cache: {
+      dedupWindowMs: 100,
+    },
+  },
+}));
+
+// ---------------------------------------------------------------------------
 // Mock Redis so tests don't need a running instance
 // ---------------------------------------------------------------------------
 vi.mock("../redis", () => {
@@ -111,11 +123,8 @@ describe("Dedup — result publishing and waiting", () => {
   });
 
   it("waitForResult returns null when no result is published in time", async () => {
-    // Override dedupWindowMs to be very small for this test
-    const result = await waitForResult("fp-no-result", 50);
-    // This will timeout because our mock config has a 10s window, but the
-    // actual implementation has a deadline. Since we're in a test, we'll
-    // just verify the function is callable and returns string | null.
-    expect(result === null || typeof result === "string").toBe(true);
+    // The mocked config caps the dedup window at 100ms, so the deadline
+    // (window + 2s buffer) is reached well inside the default test timeout.
+    await expect(waitForResult("fp-no-result", 10)).resolves.toBeNull();
   });
 });

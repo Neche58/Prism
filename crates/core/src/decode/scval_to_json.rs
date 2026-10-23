@@ -7,6 +7,7 @@
 //! module renders any `ScVal` into plain JSON.
 
 use crate::decode::auth::scaddress_to_strkey;
+use crate::decode::recursive_decoder::TypeRef;
 use crate::decode::return_decoder::ReturnValueDecoder;
 use crate::decode::struct_decoder::StructDecoder;
 use crate::spec::decoder::ContractSpec;

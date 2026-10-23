@@ -1,8 +1,10 @@
 use grat_core::decode::host_error::ClassifiedError;
 use grat_core::decode::report::build_report;
+use grat_core::spec::decoder::{decode_contract_spec, resolve_error_code, ContractErrorEntry};
 use grat_core::taxonomy::schema::ErrorCategory;
 use grat_core::types::report::DiagnosticReport;
 use grat_core::xdr::codec::XdrCodec;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -199,14 +201,252 @@ fn classify(parsed: &serde_json::Value) -> Result<ClassifiedError, String> {
     })
 }
 
+/// Structured representation of a resolved contract error returned to WebAssembly / JavaScript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedContractError {
+    /// Qualified error name, e.g. "MyError::OperationFailed".
+    pub name: String,
+    /// Numerical error code.
+    pub code: u32,
+    /// Docstring documentation if defined in the contract spec.
+    pub doc: Option<String>,
+    /// Unqualified variant name, e.g. "OperationFailed".
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub variant: Option<String>,
+    /// Alias for doc comment.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub docstring: Option<String>,
+}
+
+impl From<&ContractErrorEntry> for ResolvedContractError {
+    fn from(entry: &ContractErrorEntry) -> Self {
+        let variant = entry
+            .name
+            .split("::")
+            .last()
+            .unwrap_or(&entry.name)
+            .to_string();
+        Self {
+            name: entry.name.clone(),
+            code: entry.code,
+            doc: entry.doc.clone(),
+            variant: Some(variant),
+            docstring: entry.doc.clone(),
+        }
+    }
+}
+
+/// Core logic to parse contract WASM spec and resolve error code into readable details.
+pub fn resolve_contract_error_inner(
+    wasm_bytes: &[u8],
+    error_code: u32,
+) -> Result<Option<ResolvedContractError>, String> {
+    if wasm_bytes.len() < 8 || &wasm_bytes[0..4] != b"\0asm" {
+        return Err("invalid WASM binary: invalid magic header".to_string());
+    }
+
+    let spec = decode_contract_spec(wasm_bytes).map_err(|e| e.to_string())?;
+
+    Ok(resolve_error_code(&spec, error_code).map(ResolvedContractError::from))
+}
+
+/// Resolves a custom contract error code from a contract's WASM bytecode.
+///
+/// Parses the `contractspecv0` custom section in the provided contract WASM bytes,
+/// searches for error enum definitions (`ScSpecUdtErrorEnumV0`), and maps the
+/// `error_code` into its human-readable variant name and docstrings.
+///
+/// Returns a structured JS object `{ name, code, doc, variant, docstring }` if found,
+/// or `null` if the error code is not defined in the specification.
+/// Returns an error if the passed WASM bytes are invalid.
 #[wasm_bindgen]
 pub fn resolve_contract_error(wasm_bytes: &[u8], error_code: u32) -> Result<JsValue, JsValue> {
-    let _ = (wasm_bytes, error_code);
-    let result = serde_json::json!({ "status": "not_yet_implemented" });
-    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+    let resolved =
+        resolve_contract_error_inner(wasm_bytes, error_code).map_err(|e| JsValue::from_str(&e))?;
+
+    match resolved {
+        Some(entry) => {
+            serde_wasm_bindgen::to_value(&entry).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+        None => Ok(JsValue::NULL),
+    }
 }
 
 #[wasm_bindgen]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stellar_xdr::curr::{
+        Limits, ScSpecEntry, ScSpecUdtErrorEnumCaseV0, ScSpecUdtErrorEnumV0, WriteXdr,
+    };
+
+    fn leb128_encode(mut value: u64) -> Vec<u8> {
+        let mut result = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            result.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        result
+    }
+
+    fn build_wasm_with_error_enums(enums: Vec<ScSpecUdtErrorEnumV0>) -> Vec<u8> {
+        let mut section_data = Vec::new();
+        for err_enum in enums {
+            let entry = ScSpecEntry::UdtErrorEnumV0(err_enum);
+            let bytes = entry.to_xdr(Limits::none()).unwrap();
+            section_data.extend_from_slice(&bytes);
+        }
+
+        let section_name = "contractspecv0";
+        let mut custom_payload = Vec::new();
+        custom_payload.extend_from_slice(&leb128_encode(section_name.len() as u64));
+        custom_payload.extend_from_slice(section_name.as_bytes());
+        custom_payload.extend_from_slice(&section_data);
+
+        let mut wasm = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+        wasm.push(0);
+        wasm.extend_from_slice(&leb128_encode(custom_payload.len() as u64));
+        wasm.extend(custom_payload);
+        wasm
+    }
+
+    fn sample_contract_wasm() -> Vec<u8> {
+        let error_enum = ScSpecUdtErrorEnumV0 {
+            doc: "General contract errors".try_into().unwrap(),
+            lib: "".try_into().unwrap(),
+            name: "ContractError".try_into().unwrap(),
+            cases: vec![
+                ScSpecUdtErrorEnumCaseV0 {
+                    doc: "Caller is not authorized to perform action".try_into().unwrap(),
+                    name: "Unauthorized".try_into().unwrap(),
+                    value: 1,
+                },
+                ScSpecUdtErrorEnumCaseV0 {
+                    doc: "Account balance is too low".try_into().unwrap(),
+                    name: "InsufficientBalance".try_into().unwrap(),
+                    value: 2,
+                },
+                ScSpecUdtErrorEnumCaseV0 {
+                    doc: "".try_into().unwrap(),
+                    name: "Expired".try_into().unwrap(),
+                    value: 3,
+                },
+            ]
+            .try_into()
+            .unwrap(),
+        };
+        build_wasm_with_error_enums(vec![error_enum])
+    }
+
+    #[test]
+    fn test_resolve_contract_error_success() {
+        let wasm = sample_contract_wasm();
+
+        let res = resolve_contract_error_inner(&wasm, 1).unwrap().expect("should find error");
+        assert_eq!(res.name, "ContractError::Unauthorized");
+        assert_eq!(res.code, 1);
+        assert_eq!(res.doc, Some("Caller is not authorized to perform action".to_string()));
+        assert_eq!(res.variant, Some("Unauthorized".to_string()));
+        assert_eq!(res.docstring, Some("Caller is not authorized to perform action".to_string()));
+
+        let res2 = resolve_contract_error_inner(&wasm, 2).unwrap().expect("should find error");
+        assert_eq!(res2.name, "ContractError::InsufficientBalance");
+        assert_eq!(res2.code, 2);
+        assert_eq!(res2.doc, Some("Account balance is too low".to_string()));
+        assert_eq!(res2.variant, Some("InsufficientBalance".to_string()));
+
+        // Case with empty docstring falls back to enum docstring
+        let res3 = resolve_contract_error_inner(&wasm, 3).unwrap().expect("should find error");
+        assert_eq!(res3.name, "ContractError::Expired");
+        assert_eq!(res3.code, 3);
+        assert_eq!(res3.doc, Some("General contract errors".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_contract_error_not_found_returns_none() {
+        let wasm = sample_contract_wasm();
+
+        let res = resolve_contract_error_inner(&wasm, 999).unwrap();
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn test_resolve_contract_error_missing_spec_section_returns_none() {
+        // Valid WASM header without contractspecv0 custom section
+        let wasm = vec![0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00];
+
+        let res = resolve_contract_error_inner(&wasm, 1).unwrap();
+        assert_eq!(res, None);
+    }
+
+    #[test]
+    fn test_resolve_contract_error_multiple_enums() {
+        let auth_error = ScSpecUdtErrorEnumV0 {
+            doc: "Auth errors".try_into().unwrap(),
+            lib: "".try_into().unwrap(),
+            name: "AuthError".try_into().unwrap(),
+            cases: vec![ScSpecUdtErrorEnumCaseV0 {
+                doc: "Access forbidden".try_into().unwrap(),
+                name: "Forbidden".try_into().unwrap(),
+                value: 100,
+            }]
+            .try_into()
+            .unwrap(),
+        };
+
+        let token_error = ScSpecUdtErrorEnumV0 {
+            doc: "Token errors".try_into().unwrap(),
+            lib: "".try_into().unwrap(),
+            name: "TokenError".try_into().unwrap(),
+            cases: vec![ScSpecUdtErrorEnumCaseV0 {
+                doc: "Transfer rejected".try_into().unwrap(),
+                name: "TransferFailed".try_into().unwrap(),
+                value: 200,
+            }]
+            .try_into()
+            .unwrap(),
+        };
+
+        let wasm = build_wasm_with_error_enums(vec![auth_error, token_error]);
+
+        let res1 = resolve_contract_error_inner(&wasm, 100).unwrap().unwrap();
+        assert_eq!(res1.name, "AuthError::Forbidden");
+        assert_eq!(res1.code, 100);
+
+        let res2 = resolve_contract_error_inner(&wasm, 200).unwrap().unwrap();
+        assert_eq!(res2.name, "TokenError::TransferFailed");
+        assert_eq!(res2.code, 200);
+    }
+
+    #[test]
+    fn test_resolve_contract_error_invalid_wasm_bytes() {
+        let invalid_bytes = [1, 2, 3, 4];
+        let err = resolve_contract_error_inner(&invalid_bytes, 1).unwrap_err();
+        assert!(err.contains("invalid WASM"));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn test_resolve_contract_error_wasm32() {
+        let wasm = sample_contract_wasm();
+        let res_wasm = resolve_contract_error(&wasm, 2).expect("should resolve successfully");
+        assert!(!res_wasm.is_null());
+        let parsed: ResolvedContractError = serde_wasm_bindgen::from_value(res_wasm).unwrap();
+        assert_eq!(parsed.name, "ContractError::InsufficientBalance");
+        assert_eq!(parsed.code, 2);
+
+        let res_null = resolve_contract_error(&wasm, 999).expect("should return null");
+        assert!(res_null.is_null());
+    }
 }

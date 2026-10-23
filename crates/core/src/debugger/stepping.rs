@@ -302,8 +302,8 @@ fn flatten_invocations(invocations: &[ContractInvocation]) -> Vec<InvocationFram
         flatten_invocation(invocation, 0, None, &mut frames);
     }
 
-    let mut cumulative_cpu = 0;
-    let mut cumulative_memory = 0;
+    let mut cumulative_cpu: u64 = 0;
+    let mut cumulative_memory: u64 = 0;
 
     for frame in &mut frames {
         cumulative_cpu = cumulative_cpu.saturating_add(frame.cpu_instructions);

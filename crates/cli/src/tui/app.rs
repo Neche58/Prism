@@ -9,29 +9,29 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use grat_core::types::{config::NetworkConfig, trace::ExecutionTrace};
+use grat_core::types::config::NetworkConfig;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 
 use super::{
     state::{Panel, TuiState},
-    widgets::timeline,
+    widgets::{controls, timeline},
 };
 
-/// Restores the terminal on normal exit, I/O errors and panic unwinding.
+/// Restore the terminal on normal exit, I/O errors, and panic unwinding.
 struct TerminalGuard;
 
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
+        let guard = Self;
         execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-        Ok(Self)
+        Ok(guard)
     }
 }
 
@@ -45,275 +45,175 @@ impl Drop for TerminalGuard {
 pub async fn launch(tx_hash: &str, network: &NetworkConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "Interactive replay requires a terminal; use `grat trace <tx-hash>` for redirected output."
+        "Interactive replay requires a terminal; use grat trace for redirected output."
     );
-
-    // The transaction is replayed before the terminal enters raw mode so that
-    // replay failures keep the regular terminal output.
+    // Fetch/reconstruct before entering raw mode: replay errors retain normal terminal output.
     let trace = grat_core::replay::replay_transaction(tx_hash, network).await?;
-
-    let mut state = TuiState {
-        tx_hash: tx_hash.to_string(),
-        selected_panel: Panel::Timeline,
-        scroll_offset: 0,
-    };
-
+    let mut state = TuiState::new(trace);
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-
     loop {
-        terminal.draw(|frame| render(frame, &state, &trace))?;
+        terminal.draw(|frame| render(frame, &state))?;
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if handle_key(&mut state, key, &trace) {
-                    break;
-                }
+            match event::read()? {
+                Event::Key(key) if handle_key(&mut state, key) => break,
+                Event::Resize(_, _) => terminal.autoresize()?,
+                _ => {}
             }
         }
     }
-
     Ok(())
 }
 
-/// Handles a key press and reports whether the debugger should exit.
-fn handle_key(state: &mut TuiState, key: KeyEvent, trace: &ExecutionTrace) -> bool {
+fn handle_key(state: &mut TuiState, key: KeyEvent) -> bool {
     if key.kind == KeyEventKind::Release {
         return false;
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
-
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => true,
-        KeyCode::Down | KeyCode::Char('j') => {
-            move_focus(state, trace, 1);
-            false
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            move_focus(state, trace, -1);
-            false
-        }
-        _ => false,
+        KeyCode::Char('q') | KeyCode::Esc => return true,
+        KeyCode::Tab => state.switch_panel(key.modifiers.contains(KeyModifiers::SHIFT)),
+        KeyCode::BackTab => state.switch_panel(true),
+        KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('s') => state.next(),
+        KeyCode::Char('k') | KeyCode::Up => state.previous(),
+        KeyCode::Char('o') => state.step_over(),
+        _ => {}
     }
+    false
 }
 
-/// Moves the focused frame by `delta` positions inside the invocation timeline.
-///
-/// `TuiState::scroll_offset` holds the index of the focused frame.
-fn move_focus(state: &mut TuiState, trace: &ExecutionTrace, delta: isize) {
-    let frames = timeline::count(&trace.invocations);
-    if frames == 0 {
-        state.scroll_offset = 0;
-        return;
-    }
-
-    let last = frames - 1;
-    let current = state.scroll_offset.min(last);
-    let next = if delta < 0 {
-        current.saturating_sub(delta.unsigned_abs())
-    } else {
-        current.saturating_add(delta.unsigned_abs())
-    };
-
-    state.scroll_offset = next.min(last);
+fn panel(title: &str, selected: bool) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(if selected {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        }))
 }
 
-/// Draws the debugger screen.
-fn render(frame: &mut Frame<'_>, state: &TuiState, trace: &ExecutionTrace) {
+fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let area = frame.area();
-    let [header_area, body_area, footer_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-
-    frame.render_widget(header(state, trace), header_area);
-
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(controls::height(area.width).min(area.height.saturating_sub(1))),
+        ])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Replay {} | {} | ledger {}",
+            state.tx_hash, state.network, state.ledger_sequence
+        )),
+        sections[0],
+    );
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sections[1]);
     timeline::render_with_focus(
         frame,
-        body_area,
-        &trace.invocations,
+        panels[0],
+        &state.invocations,
         state.scroll_offset,
-        matches!(state.selected_panel, Panel::Timeline),
+        state.selected_panel == Panel::Timeline,
     );
-
-    frame.render_widget(footer(state, trace), footer_area);
-}
-
-/// Renders the transaction summary shown above the timeline.
-fn header(state: &TuiState, trace: &ExecutionTrace) -> Paragraph<'static> {
-    Paragraph::new(Line::from(vec![
-        Span::styled("Replay ", Style::default().fg(Color::Cyan)),
-        Span::raw(state.tx_hash.clone()),
-        Span::raw(format!(
-            "  ·  {}  ·  ledger {}",
-            trace.network, trace.ledger_sequence
-        )),
-    ]))
-}
-
-/// Renders the timeline position and the available key bindings.
-fn footer(state: &TuiState, trace: &ExecutionTrace) -> Paragraph<'static> {
-    let frames = timeline::count(&trace.invocations);
-    let position = if frames == 0 {
-        0
-    } else {
-        state.scroll_offset.min(frames - 1) + 1
-    };
-
-    Paragraph::new(Line::from(vec![
-        Span::raw(format!(" Frame {position}/{frames} ")),
-        Span::styled("↑/↓ navigate", Style::default().fg(Color::DarkGray)),
-        Span::raw("  "),
-        Span::styled("q quit", Style::default().fg(Color::DarkGray)),
-    ]))
+    let details = state.entries.get(state.scroll_offset).map_or_else(
+        || "No recorded invocations. [q] quits.".to_owned(),
+        |entry| {
+            format!(
+                "Contract: {}\nFunction: {}\nArguments: {}\nReturn: {}\nError: {}",
+                entry.contract,
+                entry.function,
+                entry.arguments.join(", "),
+                entry.return_value.as_deref().unwrap_or("unavailable"),
+                entry.is_error
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(details)
+            .wrap(Wrap { trim: true })
+            .block(panel("Inspector", state.selected_panel == Panel::Inspector)),
+        panels[1],
+    );
+    controls::render(frame, sections[2], state);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grat_core::types::trace::{
-        ContractInvocation, HostFunctionCall, ResourceProfile, StateDiff, TraceId,
-    };
     use ratatui::backend::TestBackend;
 
-    fn invocation(function_name: &str) -> ContractInvocation {
-        ContractInvocation {
-            trace_id: TraceId::new(),
-            contract_id: "CONTRACT_A".to_string(),
-            function_name: function_name.to_string(),
-            arguments: Vec::new(),
-            return_value: None,
-            host_calls: Vec::<HostFunctionCall>::new(),
-            sub_invocations: Vec::new(),
-            total_cpu_instructions: 0,
-            total_memory_bytes: 0,
-            is_error: false,
-        }
-    }
-
-    fn trace(invocations: Vec<ContractInvocation>) -> ExecutionTrace {
-        ExecutionTrace {
-            tx_hash: "tx-hash".to_string(),
-            ledger_sequence: 42,
-            network: "testnet".to_string(),
-            invocations,
-            state_diff: StateDiff::default(),
-            resource_profile: ResourceProfile::default(),
-            diagnostic_events: Vec::new(),
-        }
-    }
-
-    fn state() -> TuiState {
-        TuiState {
-            tx_hash: "tx-hash".to_string(),
-            selected_panel: Panel::Timeline,
-            scroll_offset: 0,
-        }
-    }
-
-    fn press(state: &mut TuiState, key: KeyEvent, trace: &ExecutionTrace) -> bool {
-        handle_key(state, key, trace)
+    fn press(state: &mut TuiState, code: KeyCode) -> bool {
+        handle_key(state, KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     #[test]
-    fn quit_keys_leave_the_debugger() {
-        let trace = trace(Vec::new());
-        let mut state = state();
-
-        assert!(press(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            &trace
-        ));
-        assert!(press(
-            &mut state,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            &trace
-        ));
-        assert!(press(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &trace
-        ));
+    fn panels_cycle_in_both_directions() {
+        let mut state = super::super::state::fixture();
+        for expected in [Panel::Inspector, Panel::Controls, Panel::Timeline] {
+            assert!(!press(&mut state, KeyCode::Tab));
+            assert_eq!(state.selected_panel, expected);
+        }
+        press(&mut state, KeyCode::BackTab);
+        assert_eq!(state.selected_panel, Panel::Controls);
     }
 
     #[test]
-    fn navigation_moves_the_focused_frame() {
-        let trace = trace(vec![invocation("transfer"), invocation("swap")]);
-        let mut state = state();
-
-        assert!(!press(
-            &mut state,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &trace
-        ));
-        assert_eq!(state.scroll_offset, 1);
-
-        assert!(!press(
-            &mut state,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            &trace
-        ));
-        assert_eq!(state.scroll_offset, 1);
-
-        assert!(!press(
-            &mut state,
-            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-            &trace
-        ));
+    fn navigation_and_steps_use_real_trace_boundaries_and_depth() {
+        let mut state = super::super::state::fixture();
+        press(&mut state, KeyCode::Char('k'));
         assert_eq!(state.scroll_offset, 0);
-    }
-
-    #[test]
-    fn navigation_stays_inside_the_timeline() {
-        let trace = trace(vec![invocation("transfer"), invocation("swap")]);
-        let mut state = state();
-
-        for _ in 0..5 {
-            press(
-                &mut state,
-                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-                &trace,
-            );
+        press(&mut state, KeyCode::Char('s'));
+        assert_eq!(state.entries[state.scroll_offset].function, "child");
+        press(&mut state, KeyCode::Up);
+        press(&mut state, KeyCode::Char('o'));
+        assert_eq!(state.entries[state.scroll_offset].function, "sibling");
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.scroll_offset, 2);
+        assert_eq!(state.replay_status(), "Replay: End 3/3");
+        state.entries.clear();
+        state.scroll_offset = 0;
+        for code in [KeyCode::Char('s'), KeyCode::Char('o'), KeyCode::Char('k')] {
+            press(&mut state, code);
         }
         assert_eq!(state.scroll_offset, 0);
-
-        for _ in 0..5 {
-            press(
-                &mut state,
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                &trace,
-            );
-        }
-        assert_eq!(state.scroll_offset, 1);
+        assert_eq!(state.replay_status(), "Replay: no invocations");
     }
 
     #[test]
-    fn an_empty_trace_keeps_the_focus_at_the_first_frame() {
-        let trace = trace(Vec::new());
-        let mut state = state();
-
-        press(
-            &mut state,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            &trace,
-        );
+    fn releases_are_ignored_and_quit_keys_work() {
+        let mut state = super::super::state::fixture();
+        let mut release = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert!(!handle_key(&mut state, release));
         assert_eq!(state.scroll_offset, 0);
+        assert!(press(&mut state, KeyCode::Char('q')));
+        assert!(press(&mut state, KeyCode::Esc));
+        assert!(handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
     }
 
     #[test]
-    fn the_screen_shows_the_invocation_timeline() {
-        let trace = trace(vec![invocation("transfer"), invocation("swap")]);
-        let state = state();
-
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &state, &trace))
-            .unwrap();
-
+    fn timeline_and_inspector_follow_the_controls_selection() {
+        let mut state = super::super::state::fixture();
+        press(&mut state, KeyCode::Char('s'));
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &state)).unwrap();
         let text: String = terminal
             .backend()
             .buffer()
@@ -321,11 +221,33 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-
-        assert!(text.contains("tx-hash"));
         assert!(text.contains("Timeline"));
-        assert!(text.contains("transfer"));
-        assert!(text.contains("swap"));
-        assert!(text.contains("Frame 1/2"));
+        assert!(text.contains("Function: child"));
+        assert!(text.contains("ledger 1"));
+        assert!(text.contains("Replay: Paused 2/3"));
+        assert_eq!(timeline::count(&state.invocations), state.entries.len());
+    }
+
+    #[test]
+    fn layout_resizes_and_keeps_footer_visible() {
+        let state = super::super::state::fixture();
+        for (width, height) in [(120, 24), (60, 20), (40, 15), (1, 1), (0, 0)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| render(frame, &state)).unwrap();
+            if width >= 40 {
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert!(text.contains("[q] Quit") && text.contains("Replay: Paused"));
+                assert!(text.contains("Timeline"));
+            }
+            if width == 120 {
+                println!("{}", terminal.backend());
+            }
+        }
     }
 }

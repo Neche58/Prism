@@ -1,6 +1,7 @@
 "use client";
 
 import type { DiagnosticReport } from "@/lib/types";
+import SuggestedFixes from "./SuggestedFixes";
 
 interface ErrorCardProps {
   report: DiagnosticReport;
@@ -59,70 +60,35 @@ export default function ErrorCard({ report }: ErrorCardProps) {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 border-t border-slate-800 pt-6">
-        <div>
-          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
-            Common Causes
-          </h4>
-          {report.root_causes && report.root_causes.length > 0 ? (
-            <ul className="space-y-3">
-              {report.root_causes.map((cause, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-slate-300 flex items-start gap-2"
-                >
-                  <span className="text-red-400 mt-1">•</span>
-                  <div>
-                    <p>{cause.description}</p>
-                    <span className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">
-                      Likelihood: {cause.likelihood}
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-sm text-slate-500 italic">
-              No common causes documented.
-            </p>
-          )}
-        </div>
-
-        <div>
-          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
-            Suggested Fixes
-          </h4>
-          {report.suggested_fixes && report.suggested_fixes.length > 0 ? (
-            <ul className="space-y-3">
-              {report.suggested_fixes.map((fix, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-slate-300 flex items-start gap-2"
-                >
-                  <span className="text-emerald-400 mt-1">✓</span>
-                  <div>
-                    <p>{fix.description}</p>
-                    <div className="flex gap-2 mt-1">
-                      <span className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">
-                        Difficulty: {fix.difficulty}
-                      </span>
-                      {fix.requires_upgrade && (
-                        <span className="text-[10px] text-amber-500 uppercase tracking-wider font-mono">
-                          Requires Upgrade
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-sm text-slate-500 italic">
-              No suggested fixes documented.
-            </p>
-          )}
-        </div>
+      <div className="mt-6 border-t border-slate-800 pt-6">
+        <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
+          Common Causes
+        </h4>
+        {report.root_causes && report.root_causes.length > 0 ? (
+          <ul className="space-y-3">
+            {report.root_causes.map((cause, i) => (
+              <li
+                key={i}
+                className="text-sm text-slate-300 flex items-start gap-2"
+              >
+                <span className="text-red-400 mt-1">•</span>
+                <div>
+                  <p>{cause.description}</p>
+                  <span className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">
+                    Likelihood: {cause.likelihood}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-slate-500 italic">
+            No common causes documented.
+          </p>
+        )}
       </div>
+
+      <SuggestedFixes fixes={report.suggested_fixes} />
     </div>
   );
 }

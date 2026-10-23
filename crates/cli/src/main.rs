@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Diagnostic(args) => commands::diagnostic::run(args).await?,
         Commands::History => commands::history::run(&cli.output).await?,
         Commands::Serve(args) => commands::serve::run(args, &network).await?,
-        Commands::SearchError(args) => commands::search_error::run(args).await?,
+        Commands::SearchError(args) => commands::search_error::run(args, &cli.output).await?,
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();

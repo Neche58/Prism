@@ -3,7 +3,9 @@ use crate::network::NetworkConfig;
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::path::Path;
-use stellar_xdr::curr::{LedgerHeader, LedgerHeaderHistoryEntry, Limits, ReadXdr};
+use stellar_xdr::curr::{
+    BucketEntry, LedgerHeader, LedgerHeaderHistoryEntry, LedgerKey, Limits, ReadXdr, WriteXdr,
+};
 
 #[derive(Debug)]
 pub struct ArchiveClient {
@@ -232,14 +234,161 @@ impl ArchiveClient {
 
     pub async fn fetch_ledger_entry(
         &self,
-        _ledger_sequence: u32,
-        _key: &str,
+        ledger_sequence: u32,
+        key: &str,
     ) -> GratResult<Vec<u8>> {
-        Err(ArchiveErrorKind::FetchFailed {
-            file: format!("ledger-entry-{_ledger_sequence}-{_key}"),
-            reason: "Ledger entry fetch not yet implemented".to_string(),
+        use base64::Engine;
+
+        let file = format!("ledger-entry-{ledger_sequence}-{key}");
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(key)
+            .map_err(|e| ArchiveErrorKind::MalformedXdr {
+                file: file.clone(),
+                reason: format!("ledger key must be base64 encoded XDR: {e}"),
+            })?;
+        let mut key_input = key_bytes.as_slice();
+        let wanted_key = LedgerKey::read_xdr(&mut key_input, Limits::none()).map_err(|e| {
+            ArchiveErrorKind::MalformedXdr {
+                file: file.clone(),
+                reason: format!("failed to decode ledger key: {e}"),
+            }
+        })?;
+        if !key_input.is_empty() {
+            return Err(ArchiveErrorKind::MalformedXdr {
+                file,
+                reason: "ledger key contains trailing bytes".to_string(),
+            }
+            .into());
         }
-        .into())
+        let wanted_key_xdr = wanted_key.to_xdr(Limits::none()).map_err(|e| {
+            ArchiveErrorKind::MalformedXdr {
+                file: format!("ledger-entry-{ledger_sequence}-{key}"),
+                reason: format!("failed to encode ledger key: {e}"),
+            }
+        })?;
+
+        let checkpoint_seq = get_checkpoint_seq(ledger_sequence);
+        let mut last_error = None;
+        for base_url in &self.archive_urls {
+            let history_path = format_history_path(checkpoint_seq);
+            let history_url = join_url(base_url, &history_path);
+            let history_bytes = match self.client.get(&history_url).send().await {
+                Ok(response) if response.status().is_success() => match response.bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        last_error = Some(e.to_string());
+                        continue;
+                    }
+                },
+                Ok(response) => {
+                    last_error = Some(format!("HTTP status {}", response.status()));
+                    continue;
+                }
+                Err(e) => {
+                    last_error = Some(e.to_string());
+                    continue;
+                }
+            };
+            let history: serde_json::Value = match serde_json::from_slice(&history_bytes) {
+                Ok(history) => history,
+                Err(e) => {
+                    last_error = Some(format!("failed to parse history state: {e}"));
+                    continue;
+                }
+            };
+            let Some(levels) = history
+                .get("currentBuckets")
+                .and_then(serde_json::Value::as_array)
+            else {
+                last_error = Some("history state has no currentBuckets array".to_string());
+                continue;
+            };
+
+            // Level zero is newest. Within a level curr is newer than snap.
+            let mut hashes = Vec::new();
+            let mut invalid_hash = None;
+            for level in levels.iter().rev() {
+                for field in ["curr", "snap"] {
+                    let Some(hash) = level.get(field).and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    if hash.chars().all(|c| c == '0') {
+                        continue;
+                    }
+                    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        invalid_hash = Some(format!("invalid bucket hash {hash}"));
+                        break;
+                    }
+                    hashes.push(hash.to_ascii_lowercase());
+                }
+                if invalid_hash.is_some() {
+                    break;
+                }
+            }
+            if let Some(error) = invalid_hash {
+                last_error = Some(error);
+                continue;
+            }
+
+            let mut archive_failed = false;
+            for hash in hashes {
+                let bucket_path = format_bucket_path(&hash);
+                let bucket_url = join_url(base_url, &bucket_path);
+                let bytes =
+                    match fetch_and_decompress(&self.client, &bucket_url, &bucket_path).await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            last_error = Some(e.to_string());
+                            archive_failed = true;
+                            break;
+                        }
+                    };
+                let mut stream = bytes.as_slice();
+                while !stream.is_empty() {
+                    let entry = BucketEntry::read_xdr(&mut stream, Limits::none()).map_err(|e| {
+                        ArchiveErrorKind::MalformedXdr {
+                            file: bucket_path.clone(),
+                            reason: format!("failed to decode bucket entry: {e}"),
+                        }
+                    })?;
+                    match entry {
+                        BucketEntry::Liveentry(entry) | BucketEntry::Initentry(entry) => {
+                            let entry_key = LedgerKey::from(&entry);
+                            if entry_key.to_xdr(Limits::none()).ok().as_deref()
+                                == Some(&wanted_key_xdr)
+                            {
+                                return entry.to_xdr(Limits::none()).map_err(|e| {
+                                    ArchiveErrorKind::MalformedXdr {
+                                        file: bucket_path.clone(),
+                                        reason: format!("failed to encode ledger entry: {e}"),
+                                    }
+                                    .into()
+                                });
+                            }
+                        }
+                        BucketEntry::Deadentry(dead_key) if dead_key == wanted_key => {
+                            return Err(ArchiveErrorKind::FetchFailed {
+                                file,
+                                reason: "ledger entry was deleted at this checkpoint".to_string(),
+                            }
+                            .into());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if archive_failed {
+                continue;
+            }
+            return Err(ArchiveErrorKind::FetchFailed {
+                file,
+                reason: "ledger key not found in checkpoint bucket list".to_string(),
+            }.into());
+        }
+        Err(ArchiveErrorKind::FetchFailed {
+            file,
+            reason: last_error.unwrap_or_else(|| "no archive URLs configured".to_string()),
+        }.into())
     }
 
     pub async fn get_ledger_header(&self, ledger_sequence: u32) -> GratResult<LedgerHeader> {
@@ -260,6 +409,25 @@ impl ArchiveClient {
         }
         .into())
     }
+}
+
+fn format_history_path(checkpoint_seq: u32) -> String {
+    let hex = format!("{checkpoint_seq:08x}");
+    format!(
+        "history/{}/{}/{}/history-{hex}.json",
+        &hex[0..2],
+        &hex[2..4],
+        &hex[4..6]
+    )
+}
+
+fn format_bucket_path(hash: &str) -> String {
+    format!(
+        "bucket/{}/{}/{}/bucket-{hash}.xdr.gz",
+        &hash[0..2],
+        &hash[2..4],
+        &hash[4..6]
+    )
 }
 
 /// Parses a stream of XDR-encoded `LedgerHeaderHistoryEntry` records using RFC 5531 Record Marking format.

@@ -151,7 +151,7 @@ fn matches_type(value: &ScVal, type_def: &ScSpecTypeDef) -> bool {
         ScSpecTypeDef::Tuple(spec) => match value {
             ScVal::Vec(Some(values)) if values.len() == spec.value_types.len() => values
                 .iter()
-                .zip(&spec.value_types)
+                .zip(spec.value_types.iter())
                 .all(|(element, element_type)| matches_type(element, element_type)),
             _ => false,
         },

@@ -65,6 +65,21 @@ Grat is organized as a modular monorepo:
 
 ## Documentation
 
+### Interactive replay controls
+
+Run `grat replay <tx-hash> --interactive` in a terminal to reconstruct a replay
+and browse its recorded invocations. `Tab` / `Shift+Tab` cycles panel focus;
+`j` / `k` (or arrow keys) navigates the trace. `s` advances into the next
+invocation, while `o` skips nested invocations to the next sibling or ancestor.
+Use `q`, `Esc`, or `Ctrl+C` to quit. These controls browse the captured replay;
+they do not pause or execute a live contract VM.
+
+The footer shows the replay position and total CPU instructions / memory bytes.
+Percentages use the limits supplied by the replay profile; `n/a` means the
+profile did not provide a limit, not zero usage. The current replay profiler
+does not populate those limits. Terminal setup happens after reconstruction,
+and raw mode, cursor visibility, and the alternate screen are restored on exit.
+
 For full technical specifications, architecture deep-dives, and API references, visit our [Live Documentation](https://grat-ddf93e61.mintlify.app/docs/introduction).
 
 <CardGroup cols={2}>

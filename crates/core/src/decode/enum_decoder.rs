@@ -40,27 +40,30 @@ impl EnumDecoder {
                     .cases
                     .iter()
                     .find(|case| case.value == discriminant)
-                    .map_or_else(|| json!(*discriminant), |case| json!(case.name))
+                    .map_or_else(|| json!(discriminant), |case| json!(case.name))
             }
             ScVal::Symbol(symbol) => json!(symbol.to_string()),
             ScVal::String(string) => json!(string.to_string()),
             ScVal::Vec(Some(values)) if !values.is_empty() => {
                 let Some(variant_name) = variant_name(&values[0]) else {
-                    return scval_to_json(val);
+                    return scval_to_json(val, None);
                 };
 
                 if !enum_def.cases.iter().any(|case| case.name == variant_name) {
-                    return scval_to_json(val);
+                    return scval_to_json(val, None);
                 }
 
-                let payload: Vec<Value> = values[1..].iter().map(scval_to_json).collect();
+                let payload: Vec<Value> = values[1..]
+                    .iter()
+                    .map(|v| scval_to_json(v, None))
+                    .collect();
                 match payload.as_slice() {
                     [] => json!(variant_name),
                     [value] => json!({ variant_name: value }),
                     _ => json!({ variant_name: payload }),
                 }
             }
-            _ => scval_to_json(val),
+            _ => scval_to_json(val, None),
         }
     }
 }

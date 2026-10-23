@@ -1,5 +1,7 @@
 use crate::decode::enum_decoder::EnumDecoder;
+use crate::decode::recursive_decoder::{RecursiveTypeDecoder, TypeRef};
 use crate::decode::struct_decoder::StructDecoder;
+use crate::decode::tuple_decoder::TupleDecoder;
 use crate::spec::decoder::{ContractFunction, ContractSpec, ContractStructDef};
 use serde_json::{json, Value};
 use stellar_xdr::curr::{ScSpecTypeDef, ScVal};

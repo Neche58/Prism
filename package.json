@@ -6,6 +6,7 @@
   "scripts": {
     "dev:web": "pnpm --filter grat-web dev",
     "dev:server": "pnpm --filter grat-server dev",
+    "dev:worker": "pnpm --filter grat-server worker",
     "build:taxonomy": "node scripts/build-taxonomy.js",
     "build:web": "pnpm run build:taxonomy && pnpm --filter grat-web build",
     "build:server": "pnpm --filter grat-server build",
@@ -13,6 +14,7 @@
     "build:wasm": "powershell -File scripts/build-wasm.ps1",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
     "clean": "pnpm -r clean"
   },
   "engines": {

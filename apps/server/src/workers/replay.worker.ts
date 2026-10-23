@@ -1,8 +1,11 @@
 import { Worker } from "bullmq";
 import { config } from "../config";
 import { explainError } from "../ai";
+import type { ReplayJobData, ReplayJobResult } from "./queue";
 
-const worker = new Worker(
+// The third type parameter pins the worker to the same queue name the producer
+// uses, so a rename on either side becomes a compile error.
+const worker = new Worker<ReplayJobData, ReplayJobResult, "replay">(
   "replay",
   async (job) => {
     console.log(`Processing replay job ${job.id}: ${job.data.txHash}`);

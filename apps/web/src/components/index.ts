@@ -2,11 +2,14 @@ export { default as Header } from "./layout/Header";
 export { default as Footer } from "./layout/Footer";
 export { default as NetworkSwitcher } from "./layout/NetworkSwitcher";
 
-export { default as DecodeForm } from "./decode/DecodeForm";
-export { default as ErrorCard } from "./decode/ErrorCard";
-export { default as ContractErrorView } from "./decode/ContractErrorView";
-export { default as ContextSummary } from "./decode/ContextSummary";
-export { default as SuggestedFixes } from "./decode/SuggestedFixes";
+export {
+  DecodeForm,
+  ErrorCard,
+  ContractErrorView,
+  ContextSummary,
+  SuggestedFixes,
+} from "./decode";
+export type { SuggestedFixesProps } from "./decode";
 
 export { default as ExecutionTimeline } from "./trace/ExecutionTimeline";
 export { default as StateDiffViewer } from "./trace/StateDiffViewer";

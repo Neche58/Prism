@@ -3,7 +3,7 @@
 use crate::types::trace::{DiffChangeType, LedgerEntryDiff, StateDiff};
 use serde::Serialize;
 use std::fmt::{self, Debug};
-use stellar_xdr::curr::{AccountEntry, Signer, Asset, ContractCodeEntry, ContractDataEntry, ScMap, ScVal, TrustLineEntry};
+use stellar_xdr::curr::{AccountEntry, ContractCodeEntry, ContractDataEntry, ScMap, ScVal, Signer, TrustLineEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountEntryDiff {

@@ -58,7 +58,7 @@ pub fn extract_contract_metadata(wasm_bytes: &[u8]) -> GratResult<ContractMetada
     );
     let mut metadata = ContractMetadata::default();
     loop {
-        let start = limited.inner().position();
+        let start = limited.inner.position();
         let key = match ScSymbol::read_xdr(&mut limited) {
             Ok(key) => key.to_string(),
             Err(_) => break,
@@ -70,7 +70,7 @@ pub fn extract_contract_metadata(wasm_bytes: &[u8]) -> GratResult<ContractMetada
             Ok(_) => continue,
             Err(_) => break,
         };
-        if limited.inner().position() <= start {
+        if limited.inner.position() <= start {
             break;
         }
         metadata.entries.insert(key, value);
